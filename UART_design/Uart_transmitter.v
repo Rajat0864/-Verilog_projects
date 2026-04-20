@@ -13,8 +13,8 @@ module uart_tx #(
 // ─────────────────────────────────────────
 // Local Parameters
 // ─────────────────────────────────────────
-localparam BIT_TIME      = CLK_FREQ / BAUD_RATE;  // 434 cycles @ 50MHz/115200
-localparam COUNTER_WIDTH = $clog2(BIT_TIME);       // 9 bits for 434
+localparam BIT_TIME      = CLK_FREQ / BAUD_RATE;  
+localparam COUNTER_WIDTH = $clog2(BIT_TIME);       // 9 bits for 87
 
 // State encoding
 localparam IDLE      = 2'b00;
