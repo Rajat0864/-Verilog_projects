@@ -1,5 +1,5 @@
 module uart_tx #(
-    parameter CLK_FREQ  = 50_000_000,  // 50 MHz default
+    parameter CLK_FREQ  = 10_000_000,  // 10 MHz default
     parameter BAUD_RATE = 115200        // 115200 baud default
 )(
     input            clk,        // FPGA clock
