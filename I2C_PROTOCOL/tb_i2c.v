@@ -1,66 +1,100 @@
+`timescale 1ns/1ps
 
-module tb_i2c;
-    reg clk;
-    reg rst;
-    reg start;
-    reg [6:0] test_slave_addr;
-    reg [7:0] test_data;
-    wire sda;
-    wire scl;
-    wire busy, done, ack_error;
-    pullup(sda);
-    iic_controller uut (
-        .clk        (clk),
-        .rst        (rst),
-        .start      (start),
-        .slave_addr (test_slave_addr),
-        .data       (test_data),
-        .sda        (sda),
-        .scl        (scl),
-        .busy       (busy),
-        .done       (done),
-        .ack_error  (ack_error)
-    );
-    iic_slave_model #(.MY_ADDR(7'h42)) slave (
-        .sda(sda),
-        .scl(scl)
-    );
-    initial begin
-        clk = 0;
-        forever #5 clk = ~clk;
-    end
-    initial begin
-        #2_000_000;
-        $display("[TB] TIMEOUT - simulation did not complete");
-        $finish;
-    end
-    initial begin
-        $dumpfile("tb_i2c.vcd");
-        $dumpvars(0, tb_i2c);
-    end
-    initial begin
-        rst             = 1;
-        start           = 0;
-        test_slave_addr = 7'h42;
-        test_data       = 8'b1010_1010;
-        #50;
-        rst = 0;
-        #50;
-        start = 1;
-        #10;
-        start = 0;
-        wait (done == 1'b1);
-        #20;
-        if (ack_error)
-            $display("[TB] Transaction completed with ACK ERROR at time %0t", $time);
-        else
-            $display("[TB] Transaction completed successfully at time %0t", $time);
-        $display("Test completed.");
-        #200;
-        $finish;
-    end
-    initial begin
-        $monitor("Time=%0t SCL=%b SDA=%b state=%0d busy=%b done=%b ack_err=%b",
-                  $time, scl, sda, uut.state, busy, done, ack_error);
-    end
+module tb_i2c_top;
+
+
+  reg        clk;
+  reg        reset;
+  reg        start;
+  reg  [7:0] ADDR;
+  reg  [7:0] data_in;
+  reg  [7:0] MY_ADDR;
+
+
+  wire       scl_bus;
+  wire       sda_bus;
+  wire       data_valid;
+  wire [7:0] rx_addr;
+  wire [7:0] rx_data;
+
+
+  i2c_top dut (
+    .clk        (clk),
+    .reset      (reset),
+    .start      (start),
+    .ADDR       (ADDR),
+    .data_in    (data_in),
+    .MY_ADDR    (MY_ADDR),
+    .scl_bus    (scl_bus),
+    .sda_bus    (sda_bus),
+    .data_valid (data_valid),
+    .rx_addr    (rx_addr),
+    .rx_data    (rx_data)
+  );
+
+
+  initial clk = 0;
+  always  #5 clk = ~clk;
+
+
+  reg captured_valid;
+  always @(posedge clk) begin
+    if (reset)
+      captured_valid <= 1'b0;
+    else if (data_valid)
+      captured_valid <= 1'b1;
+  end
+
+
+  initial begin
+    $dumpfile("i2c_top.vcd");
+    $dumpvars(0, tb_i2c_top);
+  end
+
+
+  initial begin
+    $monitor("T=%0t  scl=%b sda=%b  M_st=%0d S_st=%0d  rx_addr=%h rx_data=%h  valid=%b",
+             $time,
+             scl_bus, sda_bus,
+             dut.u_master.state,
+             dut.u_slave.state,
+             rx_addr, rx_data, data_valid);
+  end
+
+
+  initial begin
+
+    reset = 1; start = 0;
+    ADDR = 8'h00; data_in = 8'h00; MY_ADDR = 8'hA5;
+    #80;
+    reset = 0;
+    #40;
+
+
+    captured_valid = 0;
+    ADDR = 8'hA5; data_in = 8'h3C;
+    start = 1; #50; start = 0;
+    #5000;
+    $display("T1: rx_addr=%h  rx_data=%h  captured_valid=%b  (expect A5 3C 1)",
+             rx_addr, rx_data, captured_valid);
+
+
+    captured_valid = 0;
+    ADDR = 8'h72; data_in = 8'hFF;
+    start = 1; #50; start = 0;
+    #5000;
+    $display("T2: rx_addr=%h  rx_data=%h  captured_valid=%b  (expect no change, valid=0)",
+             rx_addr, rx_data, captured_valid);
+
+
+    captured_valid = 0;
+    ADDR = 8'hA5; data_in = 8'h55;
+    start = 1; #50; start = 0;
+    #5000;
+    $display("T3: rx_addr=%h  rx_data=%h  captured_valid=%b  (expect A5 55 1)",
+             rx_addr, rx_data, captured_valid);
+
+    $finish;
+  end
+
 endmodule
