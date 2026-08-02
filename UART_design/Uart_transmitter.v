@@ -1,28 +1,33 @@
+`timescale 1ns / 1ps
+//====================================================================
+// Uart_T
+// NOTE vs. the version you pasted: one port added -> "tx_en".
+// Every state transition is now gated by "if (tx_en)" so the FSM only
+// advances on the baud generator's 1x tick, not on every system clk
+// edge. All FSM/parity logic is otherwise unchanged.
+//====================================================================
 module Uart_T (
     input        reset,
     input        clk,
+    input        tx_en,          // <-- added: 1x baud tick from baud_rate_genrator
     input        tx_start,
     input  [7:0] Data_in,
     output reg   Tx_out,
     output       busy
 );
-
 reg [7:0] shift_reg;
 reg [7:0] tx_data_reg;
 reg [2:0] bit_count;
 reg [2:0] state;
-
 parameter IDLE         = 3'b000,
           START        = 3'b001,
           DATA         = 3'b010,
           PARITY_CHECK = 3'b011,
           STOP         = 3'b100;
 
-// UART is busy whenever it is not in IDLE
 assign busy = (state != IDLE);
 
 always @(posedge clk) begin
-
     if (reset) begin
         Tx_out      <= 1'b1;
         shift_reg   <= 8'd0;
@@ -30,17 +35,13 @@ always @(posedge clk) begin
         bit_count   <= 3'd7;
         state       <= IDLE;
     end
-
     else begin
-
         case(state)
-
-        //----------------------------------------
-        // IDLE
-        //----------------------------------------
+        // IDLE is checked every clk edge (NOT gated by tx_en) so a
+        // tx_start pulse is never missed while waiting for the next
+        // baud tick, which only occurs once every ~104us.
         IDLE: begin
             Tx_out <= 1'b1;
-
             if(tx_start) begin
                 shift_reg   <= Data_in;
                 tx_data_reg <= Data_in;
@@ -48,223 +49,42 @@ always @(posedge clk) begin
                 state       <= START;
             end
         end
-
-        //----------------------------------------
-        // START BIT
-        //----------------------------------------
+        // All other states advance only on the tx_en baud tick.
         START: begin
-            Tx_out <= 1'b0;
-            state  <= DATA;
+            if (tx_en) begin
+                Tx_out <= 1'b0;
+                state  <= DATA;
+            end
         end
-
-        //----------------------------------------
-        // DATA BITS
-        //----------------------------------------
         DATA: begin
-
-            Tx_out    <= shift_reg[0];
-            shift_reg <= shift_reg >> 1;
-
-            if(bit_count == 3'd0)
-                state <= PARITY_CHECK;
-            else begin
-                bit_count <= bit_count - 1'b1;
-                state <= DATA;
+            if (tx_en) begin
+                Tx_out    <= shift_reg[0];
+                shift_reg <= shift_reg >> 1;
+                if(bit_count == 3'd0)
+                    state <= PARITY_CHECK;
+                else begin
+                    bit_count <= bit_count - 1'b1;
+                    state <= DATA;
+                end
             end
         end
-
-        //----------------------------------------
-        // PARITY BIT (EVEN)
-        //----------------------------------------
         PARITY_CHECK: begin
-            Tx_out <= ^tx_data_reg;
-            state  <= STOP;
+            if (tx_en) begin
+                Tx_out <= ^tx_data_reg;
+                state  <= STOP;
+            end
         end
-
-        //----------------------------------------
-        // STOP BIT
-        //----------------------------------------
         STOP: begin
-            Tx_out <= 1'b1;
-            state  <= IDLE;
+            if (tx_en) begin
+                Tx_out <= 1'b1;
+                state  <= IDLE;
+            end
         end
-
-        //----------------------------------------
-        // DEFAULT
-        //----------------------------------------
         default: begin
             Tx_out <= 1'b1;
             state  <= IDLE;
         end
-
-        endcase
-
-    end
-
-end
-
-endmodulemodule uart_tx #(
-    parameter CLK_FREQ  = 50_000_000,  // 50 MHz default
-    parameter BAUD_RATE = 115200        // 115200 baud default
-)(
-    input            clk,        // FPGA clock
-    input            rst,        // Active high reset
-    input      [7:0] data,       // 8-bit parallel data
-    input            tx_start,   // Pulse HIGH to start
-    output reg       tx_out,     // Serial output line
-    output           tx_done     // HIGH when idle/done
-);
-
-// ─────────────────────────────────────────
-// Local Parameters
-// ─────────────────────────────────────────
-localparam BIT_TIME      = CLK_FREQ / BAUD_RATE;  // 434 cycles @ 50MHz/115200
-localparam COUNTER_WIDTH = $clog2(BIT_TIME);       // 9 bits for 434
-
-// State encoding
-parameter  IDLE = 2'b00, START_BIT = 2'b01, DATA_BITS = 2'b10, STOP_BIT  = 2'b11;
-
-// ─────────────────────────────────────────
-// Internal Registers
-// ─────────────────────────────────────────
-reg [1:0]               state , next_state;
-reg [COUNTER_WIDTH-1:0] counter   = 0;
-reg [7:0]               shift_reg = 0;
-reg [2:0]               bit_cnt   = 0;  // counts 0 to 7
-
-// ─────────────────────────────────────────
-// Control Signals (FSM → Datapath)
-// ─────────────────────────────────────────
-reg load_data;
-reg clr_counter;
-reg inc_counter;
-reg clr_bit_cnt;
-reg inc_bit_cnt;
-reg set_tx_high;
-reg set_tx_low;
-reg tx_from_shift;
-
-// ─────────────────────────────────────────
-// Status Signals (Datapath → FSM)
-// ─────────────────────────────────────────
-wire bit_time_done = (counter == BIT_TIME - 1);
-wire last_bit      = (bit_cnt == 7);
-
-// ─────────────────────────────────────────
-// Datapath
-// ─────────────────────────────────────────
-always @(posedge clk or posedge rst) begin
-    if (rst) begin
-        counter   <= 0;
-        bit_cnt   <= 0;
-        shift_reg <= 0;
-        tx_out    <= 1;       // idle line is HIGH
-    end else begin
-        if      (clr_counter) counter <= 0;
-        else if (inc_counter) counter <= counter + 1;
-
-        if      (clr_bit_cnt) bit_cnt <= 0;
-        else if (inc_bit_cnt) bit_cnt <= bit_cnt + 1;
-
-        if (load_data) shift_reg <= data;
-
-        if      (set_tx_high)   tx_out <= 1;
-        else if (set_tx_low)    tx_out <= 0;
-        else if (tx_from_shift) tx_out <= shift_reg[bit_cnt];
-    end
-end
-
-// ─────────────────────────────────────────
-// Main FSM
-// ─────────────────────────────────────────
-always @ ( posedge clk or posedge rst) begin
-if ( rst) begin
-state <= IDLE ;
-end
-else begin
-state <= next_state;
-end
-end
-always @(*) begin
-    if (rst) begin
-        state <= IDLE;
-    end else begin
-        case (state)
-            IDLE:      if (tx_start) state <= START_BIT;
-            START_BIT: if (bit_time_done)  state <= DATA_BITS;
-            DATA_BITS: if (bit_time_done && last_bit) state <= STOP_BIT;
-            STOP_BIT:  if (bit_time_done)  state <= IDLE;
-            default: state <= IDLE;
         endcase
     end
 end
-
-// ─────────────────────────────────────────
-// Control Signal Generation (combinational)
-// ─────────────────────────────────────────
-always @(*) begin
-    // defaults
-    load_data     = 0;
-    clr_counter   = 0;
-    inc_counter   = 0;
-    clr_bit_cnt   = 0;
-    inc_bit_cnt   = 0;
-    set_tx_high   = 0;
-    set_tx_low    = 0;
-    tx_from_shift = 0;
-
-    case (state)
-
-        // ── IDLE ──────────────────────────────
-        IDLE: begin
-            set_tx_high = 1;          // keep line HIGH
-            clr_counter = 1;
-            clr_bit_cnt = 1;
-            if (tx_start) load_data = 1; // latch data
-        end
-
-        // ── START BIT ─────────────────────────
-        START_BIT: begin
-            set_tx_low = 1;           // pull line LOW
-            if (bit_time_done) clr_counter = 1;
-            else               inc_counter = 1;
-        end
-
-        // ── DATA BITS (LSB first) ─────────────
-        DATA_BITS: begin
-            tx_from_shift = 1;        // send current bit
-            if (bit_time_done) begin
-                clr_counter = 1;
-                if (!last_bit) inc_bit_cnt = 1; // next bit
-            end else begin
-                inc_counter = 1;
-            end
-        end
-
-        // ── STOP BIT ──────────────────────────
-        STOP_BIT: begin
-            set_tx_high = 1;          // pull line HIGH
-            if (bit_time_done) begin
-                clr_counter = 1;
-                clr_bit_cnt = 1;      // reset bit counter before returning to IDLE
-            end else begin
-                inc_counter = 1;
-            end
-        end
-
-        // ── DEFAULT (safety net) ───────────────
-        default: begin
-            set_tx_high = 1;
-            clr_counter = 1;
-            clr_bit_cnt = 1;
-        end
-
-    endcase
-end
-
-// ─────────────────────────────────────────
-// tx_done - HIGH when idle
-// ─────────────────────────────────────────
-assign tx_done = (state == IDLE);
-
 endmodule
