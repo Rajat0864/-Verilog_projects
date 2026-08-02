@@ -7,7 +7,7 @@ module Uart_Rx (
     output reg [7:0] rx_out,
     output           busy
 );
-
+    
     parameter IDLE       = 3'b000,
               START      = 3'b001,
               DATA       = 3'b010,
