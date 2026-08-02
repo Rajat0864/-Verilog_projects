@@ -1,133 +1,94 @@
-module top_module(
-    input clk,
-    input in,
-    input reset,                    // Synchronous reset
-    output reg [7:0] out_byte,
-    output done                     // High for one cycle when valid byte is received
+module Uart_Rx (
+    input  clk, reset, rx_start,
+    input  data_in,
+    output reg [7:0] rx_out,
+    output busy                     // FIX: was "output reg busy" — but busy is driven
+                                     // by a continuous "assign" below, and a reg type
+                                     // cannot be the target of "assign". Since it's
+                                     // combinationally derived from state, it should
+                                     // just be a plain wire (default net type), not reg.
 );
-    // UART parameters
-    parameter CLKS_PER_BIT = 87;    // Example: 10MHz clock, 115200 baud, (CLKS_PER_BIT = system frequency / UART baud rate)
-    parameter IDLE = 0, START = 1, DATA = 2, PARITY = 3, STOP_CHECK = 4, STOP = 5, WAIT = 6;
-    
-    reg [2:0] state, next_state;
-    reg [3:0] count;
-    reg [15:0] clock_count;
-    reg [7:0] temp_byte;
-    reg parity_bit;
-    
-    // Metastability protection
-    reg in_sync1, in_sync2;
-    
-    always @(posedge clk) begin
-        if (reset) begin
-            in_sync1 <= 1'b1;
-            in_sync2 <= 1'b1;
-        end else begin
-            in_sync1 <= in;
-            in_sync2 <= in_sync1;
-        end
+
+reg [3:0] count;
+reg [7:0] shift_rx;
+reg [2:0] state;                // FIX: "state" was used throughout but never declared
+reg rx_bit;                     // FIX: declared for use in reset block (was undeclared)
+
+parameter IDLE        = 3'b000,
+          START        = 3'b001,
+          DATA         = 3'b010,
+          Parity_chk   = 3'b011,
+          STOP         = 3'b100;
+
+always @(posedge clk) begin
+    if (reset) begin
+        // FIX: removed "busy <= 1'b0;" — busy is now a wire (driven by the
+        // "assign busy = (state != IDLE)" below), so it can't be assigned
+        // inside this always block. It resolves to 0 automatically once
+        // state <= IDLE takes effect below.
+        rx_bit <= 1'b0;
+        rx_out <= 8'b0;
+        state  <= IDLE;          // FIX: reset block didn't initialize state; FSM
+                                  // could start in an unknown/garbage state otherwise
+        // FIX: removed "data_in <= 1'b1;" here — data_in is a module INPUT port,
+        // it can never be assigned to from inside the module (hard syntax error)
     end
-    
-    // State transition logic
-    always @(posedge clk) begin
-        if (reset)
-            state <= IDLE;
-        else
-            state <= next_state;
-    end
-    
-    always @(*) begin
+    else begin
         case (state)
-            IDLE:        
-                next_state = (in_sync2) ? IDLE : START;  // Wait for falling edge
-            START:       
-                next_state = (clock_count == (CLKS_PER_BIT-1)/2) ?
-                    ((in_sync2 == 1'b0) ? DATA : WAIT) : START;
-            DATA:        
-                next_state = (count < 7 && clock_count == CLKS_PER_BIT-1) ? DATA :
-                             (count == 7 && clock_count == CLKS_PER_BIT-1) ? PARITY : DATA;
-            PARITY:      
-                next_state = (clock_count == CLKS_PER_BIT-1) ?
-                    ((^temp_byte ^ in_sync2) ? WAIT : STOP_CHECK) : PARITY; // Even parity check - fixed syntax
-            STOP_CHECK:  
-                next_state = (clock_count == CLKS_PER_BIT-1) ?
-                    (in_sync2 ? STOP : WAIT) : STOP_CHECK;  // Stop bit must be high
-            STOP:  
-                next_state = (clock_count == CLKS_PER_BIT-1) ?
-                    (in_sync2 ? IDLE : WAIT) : STOP;        // Check stop bit and wait full period
-            WAIT:        
-                next_state = (in_sync2) ? IDLE : WAIT;
-            default:     
-                next_state = IDLE;
+
+            IDLE: begin
+                // FIX: removed "data_in <= 1'b1;" here too, same reason as above —
+                // data_in is an input, driving it is illegal
+                if (rx_start) begin
+                    count <= 3'd7;
+                    state <= START;
+                end
+            end
+
+            START: begin
+                state <= data_in ? START : DATA;  // wait for line to go low = start bit
+            end
+
+            DATA: begin
+                shift_rx <= {data_in, shift_rx[7:1]};
+                count    <= count - 1;
+                if (count == 0) begin
+                    // FIX: was "rx_out <= shift_rx;" — this read the STALE pre-shift
+                    // value of shift_rx, missing the final bit being shifted in on
+                    // this same edge. Must use the same expression as the shift_rx
+                    // assignment above so the last bit is actually captured.
+                    rx_out <= {data_in, shift_rx[7:1]};
+                    count  <= 3'd7;
+                    state  <= Parity_chk;
+                end
+            end
+
+            Parity_chk: begin
+                // FIX: was "(^data_in && ^rx_out)" then "(^data_in && ~(^rx_out))" —
+                // neither correctly compares the received parity bit against the
+                // computed parity of rx_out. AND/NOT combinations can't express
+                // "these two bits are equal" for all cases. Use "==" (equivalent
+                // to XNOR for single bits) to correctly check even parity match.
+                state <= (data_in == ^rx_out) ? STOP : START;
+            end
+
+            STOP: begin
+                if (data_in) begin
+                    state <= IDLE;
+                    $display("Next-data");
+                end
+                else begin
+                    state <= IDLE;
+                    $display("retransmit the data");
+                end
+            end
+
+            default: state <= IDLE;
+
         endcase
     end
-    
-    // Data and control path / timing
-    always @(posedge clk) begin
-        if (reset) begin
-            count <= 0;
-            out_byte <= 0;
-            temp_byte <= 0;
-            parity_bit <= 0;
-            clock_count <= 0;
-        end else if (state == IDLE) begin
-            count <= 0;
-            temp_byte <= 0;
-            parity_bit <= 0;
-            clock_count <= 0;
-        end else if (state == START) begin
-            // Timing for start bit (middle sample)
-            if (clock_count < (CLKS_PER_BIT-1)/2)
-                clock_count <= clock_count + 1;
-            else
-                clock_count <= 0; // Reset for data bits (if valid)
-        end else if (state == DATA) begin
-            // Data bits: LSB first
-            if (clock_count < CLKS_PER_BIT-1) begin
-                clock_count <= clock_count + 1;
-            end else begin
-                temp_byte[count] <= in_sync2;  // LSB first - corrected
-                count <= count + 1;
-                clock_count <= 0;
-            end
-        end else if (state == PARITY) begin
-            // Sample parity bit after all data bits
-            if (clock_count < CLKS_PER_BIT-1) begin
-                clock_count <= clock_count + 1;
-            end else begin
-                parity_bit <= in_sync2;
-                clock_count <= 0;
-            end
-        end else if (state == STOP_CHECK) begin
-            // Wait for stop bit duration
-            if (clock_count < CLKS_PER_BIT-1)
-                clock_count <= clock_count + 1;
-            else
-                clock_count <= 0;
-        end else if (state == STOP) begin
-            // Check stop bit and wait for full period
-            if (clock_count < CLKS_PER_BIT-1) begin
-                clock_count <= clock_count + 1;
-            end else begin
-                // Valid frame received -- output byte
-                out_byte <= temp_byte;
-                count <= 0;
-                temp_byte <= 0;
-                parity_bit <= 0;
-                clock_count <= 0;
-            end
-        end else if (state == WAIT) begin
-            clock_count <= 0;
-            count <= 0;
-            temp_byte <= 0;
-            parity_bit <= 0;
-        end else begin
-            clock_count <= 0;
-            count <= 0;
-        end
-    end
-    
-    assign done = (state == STOP && clock_count == CLKS_PER_BIT-1);
+end
+
+assign busy = (state != IDLE);
 
 endmodule
-
