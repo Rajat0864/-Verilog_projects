@@ -1,4 +1,134 @@
+`timescale 1ns / 1ps
+//====================================================================
+// Uart_Rx  (rewritten to use 16x oversampling)
+//
+// The version you originally pasted had NO oversampling logic at all -
+// every clken pulse was treated as "one full bit has elapsed", which
+// only works if clken is already a 1x baud tick. That is not how a
+// real UART receiver should work (no shared clock with the sender, so
+// you can't safely rely on a single sample per bit - see the earlier
+// discussion on why 16x oversampling exists).
+//
+// This version borrows the "sample" counter pattern directly from the
+// reference uart_reciever module:
+//   - clken is now expected to be the 16x baud tick (rx_clk_en)
+//   - "sample" counts 0..15 ticks within the current bit
+//   - START: waits a full 16-tick bit period after data_in first goes
+//            low, to confirm a genuine start bit (same as reference)
+//   - DATA/PARITY: the actual bit is sampled at sample==8, the
+//            mid-point of the bit - same reasoning as the reference
+//            receiver (furthest from either edge, most settled point)
+//   - state only advances once a full 16-tick bit period has elapsed
+//     (sample==15), keeping every state the same duration
+//====================================================================
 module Uart_Rx (
+    input        clk, reset, rx_start,
+    input        clken,          // 16x baud tick (rx_clk_en) from baud_rate_genrator
+    input        data_in,
+    output reg [7:0] rx_out,
+    output       busy
+);
+    parameter IDLE       = 3'b000,
+              START      = 3'b001,
+              DATA       = 3'b010,
+              Parity_chk = 3'b011,
+              STOP       = 3'b100;
+
+    reg [2:0] state;
+    reg [3:0] sample;     // 0..15 : position within the current bit (16x oversampling)
+    reg [3:0] bit_index;  // 0..8  : which data bit is currently being received
+    reg [7:0] shift_rx;
+    reg       parity_bit; // received parity bit, sampled mid-bit like the data bits
+
+    always @(posedge clk) begin
+        if (reset) begin
+            state      <= IDLE;
+            sample     <= 4'd0;
+            bit_index  <= 4'd0;
+            shift_rx   <= 8'd0;
+            rx_out     <= 8'd0;
+            parity_bit <= 1'b0;
+        end
+        else begin
+            case (state)
+                // IDLE is checked every clk edge (not gated by clken) so
+                // an rx_start pulse is never missed.
+                IDLE: begin
+                    if (rx_start) begin
+                        state  <= START;
+                        sample <= 4'd0;
+                    end
+                end
+
+                // Wait a full 16-tick bit period after the line first
+                // goes low, to confirm a real start bit (filters glitches
+                // the same way the reference uart_reciever does).
+                START: begin
+                    if (clken) begin
+                        if (!data_in || sample != 4'd0)
+                            sample <= sample + 4'd1;
+                        if (sample == 4'd15) begin
+                            state     <= DATA;
+                            sample    <= 4'd0;
+                            bit_index <= 4'd0;
+                            shift_rx  <= 8'd0;
+                        end
+                    end
+                end
+
+                // Sample each of the 8 data bits at the mid-point (sample==8),
+                // then wait out the rest of the bit period (sample==15)
+                // before moving to the next bit / next state.
+                DATA: begin
+                    if (clken) begin
+                        sample <= sample + 4'd1;
+                        if (sample == 4'h8) begin
+                            shift_rx  <= {data_in, shift_rx[7:1]};
+                            bit_index <= bit_index + 4'd1;
+                        end
+                        if (bit_index == 4'd8 && sample == 4'd15) begin
+                            state  <= Parity_chk;
+                            sample <= 4'd0;
+                            rx_out <= shift_rx;
+                        end
+                    end
+                end
+
+                // Sample the parity bit mid-bit, then compare it once the
+                // full bit period has elapsed.
+                Parity_chk: begin
+                    if (clken) begin
+                        sample <= sample + 4'd1;
+                        if (sample == 4'h8)
+                            parity_bit <= data_in;
+                        if (sample == 4'd15) begin
+                            state  <= (parity_bit == ^shift_rx) ? STOP : START;
+                            sample <= 4'd0;
+                        end
+                    end
+                end
+
+                // Sample the stop bit mid-bit, report, then return to IDLE
+                // once the full bit period has elapsed.
+                STOP: begin
+                    if (clken) begin
+                        sample <= sample + 4'd1;
+                        if (sample == 4'd15) begin
+                            state <= IDLE;
+                            if (data_in)
+                                $display("Next-data");
+                            else
+                                $display("retransmit the data");
+                        end
+                    end
+                end
+
+                default: state <= IDLE;
+            endcase
+        end
+    end
+    assign busy = (state != IDLE);
+endmodulemodule Uart_Rx (
     input  clk, reset, rx_start,
     input  data_in,
     output reg [7:0] rx_out,
